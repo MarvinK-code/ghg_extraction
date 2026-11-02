@@ -94,7 +94,6 @@ class PdfParser:
 
         logger = logging.getLogger(f"PdfParser_{self._timestamp}")
         logger.setLevel(logging.INFO)
-        logger.propagate = True # If True, shows logs in console
         logger.handlers.clear() # Clear any existing handlers to avoid duplicate logs
 
         file_handler = logging.FileHandler(log_dir / f"pipeline_{self._timestamp}.log", encoding="utf-8")
@@ -106,7 +105,7 @@ class PdfParser:
 
 
     def _load_documents(self):
-        """Returns all PDFs (any suffix case) in <pdf_dir>/<company>/."""
+        """Returns all PDFs in <pdf_dir>/<company>/."""
 
         if not self._pdf_dir.is_dir():
             raise ValueError(f"PDF directory '{self._pdf_dir}' does not exist or is not a directory.")
