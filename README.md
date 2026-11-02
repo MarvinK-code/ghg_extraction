@@ -42,7 +42,7 @@ pdf_dir: "data/reports"
 uv run main.py
 ```
 
-Parsing all reports takes a long time, especially on a CPU. Reports that were already converted are skipped, so you can stop and restart the run at any time.
+Parsing many reports may take a long time, especially on a CPU. Reports that were already converted are skipped, so you can stop and restart the run at any time.
 
 ## Output
 
@@ -50,7 +50,7 @@ Parsing all reports takes a long time, especially on a CPU. Reports that were al
 
 Every report PDF is converted into Markdown and JSON with [docling](https://github.com/docling-project/docling).
 
-The `output/` folder is created automatically in the project root (not stored in git). Before continue with the actual extraction, it must be ensured that the documents are converted (parsed).
+The `output/` folder is created automatically in the project root (not stored in git). Before continuing with the actual extraction, it must be ensured that the documents are converted (parsed).
 
 ```
 output/
@@ -76,13 +76,44 @@ The summary CSV has one row per report with, among others:
 | `parse_score`                          | quality of the PDF's text layer; empty for scanned reports                                            |
 | `ocr_score`                            | OCR quality; empty if no OCR was needed                                                               |
 
-## How parsing works
+#### How parsing works
 
 - Reports are converted one at a time. A broken PDF is marked `failed` and the run continues.
 - **OCR is applied only where needed:** pages without a text layer (scanned pages) and pages with a broken text layer are read with OCR. Normal digital pages keep their original text.
 - A GPU is used automatically if one is available (needs a CUDA build of PyTorch, see [docling documentation](https://docling-project.github.io/docling/usage/gpu/)). Otherwise everything runs on the CPU.
 
 The code is in `ghg_extraction/parsing.py`.
+
+#### Docling pipeline configuration
+
+Docling version: `2.145.0`.
+
+**OCR**
+
+OCR is enabled and uses the first available engine; with the current packages this is RapidOCR (torch). If you want to use other OCR engines, install them, e.g. `uv add "docling[easyocr]"`.
+
+**Tables**
+
+| Setting                                    | Value      | Meaning                                                                              |
+| ------------------------------------------ | ---------- | ------------------------------------------------------------------------------------ |
+| `do_table_structure`                       | `True`     | rows, columns and cells of each table are recognised (TableFormer)                   |
+| `table_structure_options.mode`             | `ACCURATE` | slower but more precise than `FAST`                                                  |
+| `table_structure_options.do_cell_matching` | `False`    | cell text follows the cells predicted by TableFormer instead of the PDF's text cells |
+
+**Pictures** (detected, but not processed)
+
+This project currently bypasses any graphical visualisations for processing in subsequent modules. Consequently, numbers that only appear inside a chart or image are **not included** in the output.
+
+**Markdown export** (`MarkdownDocSerializer`)
+
+| Setting              | Value                  | Meaning                                                                      |
+| -------------------- | ---------------------- | ---------------------------------------------------------------------------- |
+| `layers`             | `BODY` and `FURNITURE` | main text **and** page headers/footers are included                          |
+| `include_hyperlinks` | `False`                | links are written as plain text                                              |
+| `traverse_pictures`  | `False`                | text that docling places inside a picture (e.g. chart labels) is not written |
+| `image_placeholder`  | `" "` (a blank)        | each picture is replaced by a blank instead of `<!-- image -->`              |
+
+**JSON export:** the complete `DoclingDocument` (`export_to_dict()`), including body and furniture, tables with cells, picture regions, and the page and position of every element.
 
 ### Indexing
 
