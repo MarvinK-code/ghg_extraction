@@ -30,13 +30,18 @@ MIN_WORD_COUNT = 100 # below this a report is flagged for manual check
 
 class PdfParser:
     """
-    Converts every report PDF in <pdf_dir>/<company>/ with docling and writes the results to
-    <output_dir>/<company>/<report>.md and .json, plus one summary CSV per run.
+    Converts every report PDF in <pdf_dir>/<company>/ with docling. The output folder is
+    created next to pdf_dir:
+
+        <pdf_dir>/../output/
+            converted/<company>/<report>.md and .json
+            logs/pipeline_<timestamp>.log
+            summary_<timestamp>.csv
 
     Parameters
     ----------
     config : dict
-        Must contain "pdf_dir", "output_dir", "document_metadata_dir" and "log_dir".
+        Must contain "pdf_dir".
     do_ocr : bool
         OCR only runs on page regions without a PDF text layer (scanned pages) and on pages
         whose text layer is broken, so born-digital pages keep their PDF text.
@@ -47,11 +52,11 @@ class PdfParser:
 
     def __init__(self, config, do_ocr: bool = True, gpu_doc_batch_size: int = 1):
         self._pdf_dir = Path(config["pdf_dir"])
-        self._output_dir = Path(config["output_dir"])
-        self._document_metadata_dir = Path(config["document_metadata_dir"])
+        self._output_dir = self._pdf_dir.parent / "output"
+        self._converted_dir = self._output_dir / "converted"
 
         self._timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._logger = self._make_logger(Path(config["log_dir"]))
+        self._logger = self._make_logger(self._output_dir / "logs")
 
         cuda_available = torch.cuda.is_available()
 
@@ -132,7 +137,7 @@ class PdfParser:
 
 
     def _output_path(self, pdf_path: Path, suffix: str):
-        return self._output_dir / pdf_path.parent.name / f"{pdf_path.stem}{suffix}"
+        return self._converted_dir / pdf_path.parent.name / f"{pdf_path.stem}{suffix}"
 
 
     def _make_metadata_record(self, pdf_path: Path, status, error=""):
@@ -146,8 +151,7 @@ class PdfParser:
 
 
     def _save_summary(self, metadata_records):
-        self._document_metadata_dir.mkdir(parents=True, exist_ok=True)
-        summary_path = self._document_metadata_dir / f"summary_{self._timestamp}.csv"
+        summary_path = self._output_dir / f"summary_{self._timestamp}.csv"
         pd.DataFrame(metadata_records).to_csv(summary_path, index=False)
 
 
