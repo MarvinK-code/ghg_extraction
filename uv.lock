@@ -541,10 +541,16 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "docling" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "docling", specifier = ">=2.145.0" }]
+requires-dist = [
+    { name = "docling", specifier = ">=2.145.0" },
+    { name = "python-dotenv", specifier = ">=1.2.4" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+]
 
 [[package]]
 name = "h11"

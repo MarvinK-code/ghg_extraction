@@ -13,8 +13,5 @@ wheels/
 data/reports
 output/
 
-# helper
-helper/
-
 # Env
 .env
