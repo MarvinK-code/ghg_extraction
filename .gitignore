@@ -11,4 +11,10 @@ wheels/
 
 # data
 data/reports
-data/output
+output/
+
+# helper
+helper/
+
+# Env
+.env

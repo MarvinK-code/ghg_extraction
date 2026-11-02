@@ -29,8 +29,7 @@ MIN_WORD_COUNT = 100 # below this a report is flagged for manual check
 
 class PdfParser:
     """
-    Converts every report PDF in the PDF directory with docling. The output folder is
-    created next to PDF directory.
+    Converts every report PDF in the PDF directory with docling.
 
     Parameters
     ----------
@@ -45,7 +44,7 @@ class PdfParser:
 
     def __init__(self, config, do_ocr: bool = True):
         self._pdf_dir = Path(config["pdf_dir"])
-        self._output_dir = self._pdf_dir.parent / "output"
+        self._output_dir = self._pdf_dir.parent.parent / "output"
         self._converted_dir = self._output_dir / "converted"
 
         self._timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
