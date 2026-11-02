@@ -1,349 +1,244 @@
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
-
-from abc import ABC, abstractmethod
-
 from pathlib import Path
-import json, os, re, time, torch, logging
+import json, re, time, torch, logging
 from tqdm import tqdm
 import pandas as pd
 from datetime import datetime
 
-# AcceleratorDevice: a fixed set of named choices for the hardware device (CPU, CUDA, AUTO).
 from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
-
+from docling.datamodel.base_models import ConversionStatus, InputFormat
 from docling.datamodel.pipeline_options import (
-    PdfPipelineOptions, # standard CPU pipeline
+    OcrAutoOptions, # picks the first available OCR engine (RapidOCR, EasyOCR, ...)
+    PdfPipelineOptions,
     TableFormerMode, # Option choice between FAST or ACCURATE mode
-    TableStructureOptions, # detailed settings for table-parsing model # TODO keep tracking
-    ThreadedPdfPipelineOptions, # GPU pipeline accelarator options (batch size)
+    TableStructureOptions,
 )
-
-# The pipeline class used when processing on GPU.
-from docling.pipeline.threaded_standard_pdf_pipeline import ThreadedStandardPdfPipeline
-
-from docling.datamodel.base_models import InputFormat
+from docling.datamodel.settings import settings
+from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc.document import ContentLayer
 from docling_core.transforms.serializer.markdown import MarkdownDocSerializer, MarkdownParams
-from docling.document_converter import DocumentConverter, PdfFormatOption
 
 
-@dataclass
-class ParsedDocument:
-    markdown: Optional[str] = None
-    json_data: Optional[Dict[str, Any]] = None
-    txt: Optional[str] = None
-    document_metadata: Optional[Dict[str, Any]] = None # stores company report specific metadata like amount of pages, texts, tables, pictures
+MARKDOWN_PARAMS = MarkdownParams(
+    layers={ContentLayer.BODY, ContentLayer.FURNITURE},
+    include_hyperlinks=False,
+    traverse_pictures=False, # True for text content attached as children under picture nodes - Only for OCR
+    image_placeholder=" ",
+)
 
+MIN_WORD_COUNT = 100 # below this a report is flagged for manual check
 
-class BasePdfBackend(ABC):
-    @abstractmethod
-    def parse(self, pdf_path: str) -> ParsedDocument:
-        pass
-
-
-class DoclingBackend(BasePdfBackend):
-    def __init__(self, do_ocr: bool = False, use_vlm: bool = False):
-        self._configure(do_ocr, use_vlm)
-
-    def _configure(self, do_ocr: bool, use_vlm: bool):
-        cuda_available = torch.cuda.is_available()
-
-        
-        self.pipeline_options = ThreadedPdfPipelineOptions(
-            do_ocr=do_ocr,
-            accelerator_options=AcceleratorOptions(device=AcceleratorDevice.AUTO),
-            ocr_batch_size=64 if cuda_available else 4,     # 64 regions processed by OCR in parallel
-            layout_batch_size=64 if cuda_available else 4,  # 64 regions processed by layout model in parallel
-            table_batch_size=4,    # TableFormer does not benefit from large batches
-        )
-        #self.pipeline_cls = ThreadedStandardPdfPipeline
-
-        # ThreadedStandardPdfPipeline == StandardPdfPipeline (backwards-compat alias)
-        self.converter = DocumentConverter(
-            format_options={InputFormat.PDF: PdfFormatOption(
-                pipeline_cls=ThreadedStandardPdfPipeline,
-                pipeline_options=self.pipeline_options
-            )}
-        )
-
-        # Table settings
-        self.pipeline_options.do_table_structure = True
-        self.pipeline_options.table_structure_options = TableStructureOptions(
-            mode=TableFormerMode.ACCURATE,
-            do_cell_matching=False,
-        )
-
-        # TODO: VLM picture annotation — GPU only
-        if use_vlm and cuda_available:
-            # Tell docling to run picture description on all images found in the PDF.
-            self.pipeline_options.do_picture_description = True
-            self.pipeline_options.images_scale = 2.0
-            self.pipeline_options.generate_page_images = True
-
-            # TODO: configure the VLM model here when GPU hardware is available.
-        else:
-            self.pipeline_options.do_picture_description = False
-            
-
-        start_time = time.time()
-        self.converter.initialize_pipeline(InputFormat.PDF)
-        init_runtime = time.time() - start_time
-        print(f"Pipeline initialized in {init_runtime:.2f} seconds.")
-
-
-    def parse(self, pdf_path: str) -> ParsedDocument:
-        start_time = time.time()
-        conversion_result = self.converter.convert(pdf_path)
-        pipeline_runtime = time.time() - start_time
-        print(f"Document converted in {pipeline_runtime:.2f} seconds.")
-
-        markdown = MarkdownDocSerializer(doc=conversion_result.document,
-                                         params=MarkdownParams(
-                                             layers={ContentLayer.BODY, ContentLayer.FURNITURE},
-                                             include_hyperlinks=False,
-                                             traverse_pictures=False, # True for text content attached as children under picture nodes - Only for OCR
-                                             image_placeholder=" ",
-                                             ),
-                                         ).serialize().text
-
-        return ParsedDocument(
-            markdown=markdown,
-            json_data=conversion_result.document.export_to_dict(),
-            document_metadata={
-                "backend": "docling",
-                "conversion_time": pipeline_runtime,
-                "pages": len(getattr(conversion_result.document, "pages", [])),
-                "confidence_grade": conversion_result.confidence.mean_grade,
-                "confidence_score": conversion_result.confidence.layout_score,
-                "word_count": len(markdown.split()),
-                "detected_tables": len(getattr(conversion_result.document, "tables", [])),
-                "detected_pictures": len(getattr(conversion_result.document, "pictures", [])),
-                }
-            )
-
-# TODO
-class PyMuPdfBackend(BasePdfBackend):
-    pass
-
-class MarkerBackend(BasePdfBackend):
-    pass
 
 class PdfParser:
     """
-    Parses PDF documents using the selected backend and saves the extracted outputs (e.g., Markdown, JSON, and document metadata) to disk.
+    Converts every report PDF in <pdf_dir>/<company>/ with docling and writes the results to
+    <output_dir>/<company>/<report>.md and .json, plus one summary CSV per run.
 
     Parameters
     ----------
     config : dict
-        Configuration dictionary containing the input and output directories.
-    backend : str
-        Name of the parsing backend to use. Must correspond to a registered
-        backend (currently only "docling" is supported).
-    **backend_kwargs
-        Additional keyword arguments passed to the backend constructor.
-        For example, the Docling backend supports:
-            - do_ocr (bool)
-            - use_vlm (bool)
+        Must contain "pdf_dir", "output_dir", "document_metadata_dir" and "log_dir".
+    do_ocr : bool
+        OCR only runs on page regions without a PDF text layer (scanned pages) and on pages
+        whose text layer is broken, so born-digital pages keep their PDF text.
+    gpu_doc_batch_size : int
+        Number of reports converted in parallel. Only used if CUDA is available; on CPU
+        reports are always converted one at a time. Experimental in docling, benchmark first.
     """
 
-    BACKENDS = {
-        "docling": DoclingBackend,
-        "pymupdf": PyMuPdfBackend, # NOT IMPLEMENTED
-        "marker": MarkerBackend, # NOT IMPLEMENTED
-    }
+    def __init__(self, config, do_ocr: bool = True, gpu_doc_batch_size: int = 1):
+        self._pdf_dir = Path(config["pdf_dir"])
+        self._output_dir = Path(config["output_dir"])
+        self._document_metadata_dir = Path(config["document_metadata_dir"])
 
-    def __init__(self, config, backend: str, **backend_kwargs):
-        self._pdf_dir = config.get("pdf_dir", config.get("test_pdf_dir", os.makedirs("data/test_data", exist_ok=True))) # Default to test_pdf_dir if pdf_dir is not provided
-        self._json_dir = config["json_dir"]
-        self._md_dir = config["md_dir"]
-        self._document_metadata_dir = config["document_metadata_dir"]
-        
-        log_dir = config["log_dir"]
-        os.makedirs(log_dir, exist_ok=True)
+        self._timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._logger = self._make_logger(Path(config["log_dir"]))
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        self._timestamp = timestamp
+        cuda_available = torch.cuda.is_available()
 
-        log_file = os.path.join(log_dir, f"pipeline_{timestamp}.log")
+        # Batching of several documents only on GPU
+        doc_batch_size = gpu_doc_batch_size if cuda_available else 1
+        settings.perf.doc_batch_size = doc_batch_size
+        settings.perf.doc_batch_concurrency = doc_batch_size
 
-        self._logger = logging.getLogger(f"PdfParser_{timestamp}")
-        self._logger.setLevel(logging.INFO)
-        self._logger.propagate = True # If True, shows logs in console
-        self._logger.handlers.clear() # Clear any existing handlers to avoid duplicate logs
+        page_batch_size = 64 if cuda_available else 4 # pages per model batch within one document
+        pipeline_options = PdfPipelineOptions(
+            accelerator_options=AcceleratorOptions(
+                device=AcceleratorDevice.CUDA if cuda_available else AcceleratorDevice.CPU
+            ),
+            do_ocr=do_ocr,
+            ocr_options=OcrAutoOptions(replace_broken_text_layer=True),
+            do_table_structure=True,
+            table_structure_options=TableStructureOptions(
+                mode=TableFormerMode.ACCURATE,
+                do_cell_matching=False,
+            ),
+            ocr_batch_size=page_batch_size,
+            layout_batch_size=page_batch_size,
+            table_batch_size=4, # TableFormer does not benefit from large batches
+        )
 
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        self.converter = DocumentConverter(
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+        )
+
+        start_time = time.time()
+        self.converter.initialize_pipeline(InputFormat.PDF)
+        self._logger.info(
+            f"Pipeline initialized in {time.time() - start_time:.2f} seconds "
+            f"(cuda={cuda_available}, do_ocr={do_ocr}, doc_batch_size={doc_batch_size})."
+        )
+
+
+    def _make_logger(self, log_dir: Path):
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        logger = logging.getLogger(f"PdfParser_{self._timestamp}")
+        logger.setLevel(logging.INFO)
+        logger.propagate = True # If True, shows logs in console
+        logger.handlers.clear() # Clear any existing handlers to avoid duplicate logs
+
+        file_handler = logging.FileHandler(log_dir / f"pipeline_{self._timestamp}.log", encoding="utf-8")
         file_handler.setLevel(logging.INFO)
-        formatter = logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s")
-        file_handler.setFormatter(formatter)
+        file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s"))
+        logger.addHandler(file_handler)
 
-        self._logger.addHandler(file_handler)
-
-        self._run_log = log_file
-
-        try:
-            backend_cls = self.BACKENDS[backend.lower()]
-        except KeyError:
-            raise ValueError(
-                f"Unknown backend '{backend}'. "
-                f"Available: {', '.join(self.BACKENDS)}"
-            )
-
-        self.backend = backend_cls(**backend_kwargs)
-
-
-    def _log_warning(self, message: str):
-        self._logger.warning(message)
-        
-        
-    def _make_metadata_record(self, company_name, report_name, pdf_path, status, error=None, document_metadata=None):
-        record = {
-            "company_name": company_name,
-            "report_name": report_name,
-            "pdf_path": pdf_path,
-            "status": status,
-            "error": "" if error is None else str(error),
-        }
-        if document_metadata:
-            record.update(document_metadata)
-
-        return record
+        return logger
 
 
     def _load_documents(self):
-        """Loads the PDF documents from the PDF directory and stores them into a list of files."""
+        """Returns all PDFs (any suffix case) in <pdf_dir>/<company>/."""
 
-        if not os.path.isdir(self._pdf_dir):
+        if not self._pdf_dir.is_dir():
             raise ValueError(f"PDF directory '{self._pdf_dir}' does not exist or is not a directory.")
-
-        company_folders = sorted([f for f in os.listdir(self._pdf_dir) if os.path.isdir(os.path.join(self._pdf_dir, f))])
-
-        if not company_folders:
-            self._log_warning(f"No company folders found in PDF directory '{self._pdf_dir}'.")
-            return []
 
         pdf_files = []
 
-        for company_name in company_folders:
-            company_path = os.path.join(self._pdf_dir, company_name)
-
-            if not os.path.isdir(company_path):
-                self._log_warning(f"Company folder '{company_path}' is not a directory.")
-                continue
-
-            company_pdfs  = [f for f in sorted(os.listdir(company_path)) if f.lower().endswith(".pdf")]
+        for company_path in sorted(p for p in self._pdf_dir.iterdir() if p.is_dir()):
+            company_pdfs = sorted(f for f in company_path.iterdir() if f.is_file() and f.suffix.lower() == ".pdf")
 
             if not company_pdfs:
-                self._log_warning(f"No PDF files found in company folder '{company_path}'.")
+                self._logger.warning(f"No PDF files found in company folder '{company_path}'.")
                 continue
 
-            pattern = re.compile(rf"^{re.escape(company_name)}_\d{{4}}\.pdf$")
+            pattern = re.compile(rf"{re.escape(company_path.name)}_\d{{4}}\.pdf", re.IGNORECASE)
 
-            for pdf_name in company_pdfs:
-                if not pattern.fullmatch(pdf_name):
-                    self._log_warning(f"PDF file '{pdf_name}' in company folder '{company_path}' does not match the expected naming convention '{company_name}_YYYY.pdf'.")
-                    continue
-
-                pdf_path = os.path.join(company_path, pdf_name)
-                if not os.path.isfile(pdf_path):
-                    self._log_warning(f"PDF file '{pdf_path}' is not a valid file.")
-                    continue
-
+            for pdf_path in company_pdfs:
+                if not pattern.fullmatch(pdf_path.name):
+                    self._logger.warning(f"'{pdf_path}' does not match the naming convention '{company_path.name}_YYYY.pdf'. Parsing anyway.")
                 pdf_files.append(pdf_path)
 
-        if not pdf_files:
-            self._log_warning(f"No valid PDF files found in PDF directory '{self._pdf_dir}'.")
-            return []
-
-        self._logger.info(f"Found {len(pdf_files)} PDF(s) to process.")
+        self._logger.info(f"Found {len(pdf_files)} PDF(s) in '{self._pdf_dir}'.")
 
         return pdf_files
 
 
-    # Only for DoclingDocument indexing
-    def _save_json(self, json_data, company_name, report_name):
-        if json_data is None:
-            return
-
-        json_folder = Path(self._json_dir) / company_name
-        json_folder.mkdir(parents=True, exist_ok=True)
-
-        json_file = json_folder / f"{report_name}.json"
-
-        with json_file.open("w", encoding="utf-8") as fp:
-            fp.write(json.dumps(json_data))
+    def _output_path(self, pdf_path: Path, suffix: str):
+        return self._output_dir / pdf_path.parent.name / f"{pdf_path.stem}{suffix}"
 
 
-    def _save_markdown(self, markdown, company_name, report_name):
-        if markdown is None:
-            return
+    def _make_metadata_record(self, pdf_path: Path, status, error=""):
+        return {
+            "company_name": pdf_path.parent.name,
+            "report_name": pdf_path.stem,
+            "pdf_path": str(pdf_path),
+            "status": status,
+            "error": error,
+        }
 
-        md_folder = Path(self._md_dir) / company_name
-        md_folder.mkdir(parents=True, exist_ok=True)
 
-        md_file = md_folder / f"{report_name}.md"
-
-        with md_file.open("w", encoding="utf-8") as fp:
-            fp.write(markdown)
+    def _save_summary(self, metadata_records):
+        self._document_metadata_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = self._document_metadata_dir / f"summary_{self._timestamp}.csv"
+        pd.DataFrame(metadata_records).to_csv(summary_path, index=False)
 
 
     def parse_documents(self, skip_existing: bool = False):
         """Parse documents and saves the results.
 
         Args:
-            skip_existing (bool, optional): Whether to skip already existing documents. Defaults to False.
+            skip_existing (bool, optional): Skip PDFs whose markdown output already exists. Defaults to False.
         """
         pdf_files = self._load_documents()
-
-        successful = 0
-        failed = 0
-        warnings = 0
         metadata_records = []
 
-        for pdf_file in tqdm(pdf_files, colour="yellow"):
+        if skip_existing:
+            to_convert = []
+            for pdf_path in pdf_files:
+                if self._output_path(pdf_path, ".md").exists():
+                    self._logger.info(f"Already converted: {pdf_path}. Skipping...")
+                    metadata_records.append(self._make_metadata_record(pdf_path, status="skipped"))
+                else:
+                    to_convert.append(pdf_path)
+            pdf_files = to_convert
 
-            filename = os.path.basename(pdf_file)
-            report_name = os.path.splitext(filename)[0]
-            parent_folder = os.path.dirname(pdf_file)
-            company_name = os.path.basename(parent_folder)
+        # raises_on_error=False: a failing report yields a FAILURE result instead of stopping the run
+        results = self.converter.convert_all(pdf_files, raises_on_error=False)
 
-            self._logger.info(f"Processing: {filename} (company: {company_name})")
-            
-            if skip_existing:
-                parsed_company_folder = os.path.join(self._json_dir, company_name)
-                
-                if os.path.isdir(parsed_company_folder):
-                    self._logger.info(f"Already processed: {company_name}. Skipping...")
-                    continue
-                
+        start_time = time.time()
+        for conversion_result in tqdm(results, total=len(pdf_files), colour="yellow"):
+            # Time between results; equals the per-report conversion time when doc_batch_size == 1
+            conversion_time = time.time() - start_time
+
+            pdf_path = Path(conversion_result.input.file)
             try:
-                parsed_document = (self.backend.parse(pdf_file))
+                record = self._handle_result(conversion_result, pdf_path, conversion_time)
             except Exception as exc:
-                failed += 1
-                error = f"{type(exc).__name__}: {exc}"
-                self._logger.exception(f"Parsing failed for: {filename} / company={company_name}")
-                metadata_records.append(self._make_metadata_record(company_name, report_name, pdf_file, status="failed", error=error))
-                continue
-            
-            document_metadata = parsed_document.document_metadata or {}
+                self._logger.exception(f"Saving failed for: {pdf_path}")
+                record = self._make_metadata_record(pdf_path, status="failed", error=f"{type(exc).__name__}: {exc}")
 
-            if document_metadata.get("word_count", 0) < 100:
-                warnings += 1
-                self._log_warning(f"PLEASE CHECK MANUALLY: '{filename}' in {pdf_file} (is likely a scanned document)")
-                metadata_records.append(self._make_metadata_record(company_name, report_name, pdf_file, status="warning", error="", document_metadata=document_metadata))
-                continue
+            metadata_records.append(record)
+            self._save_summary(metadata_records) # after every report, so a crash keeps all finished records
+            start_time = time.time()
 
-            self._save_json(parsed_document.json_data, company_name, report_name)
+        if not pdf_files:
+            self._save_summary(metadata_records)
 
-            self._save_markdown(parsed_document.markdown, company_name, report_name)
-            
-            successful += 1
-            metadata_records.append(self._make_metadata_record(company_name, report_name, pdf_file, status="success", error="", document_metadata=document_metadata))
-            
-            os.makedirs(self._document_metadata_dir, exist_ok=True)
-            metadata_summary_path = os.path.join(self._document_metadata_dir, f"summary_{self._timestamp}.csv")
-            pd.DataFrame(metadata_records).to_csv(metadata_summary_path, index=False)
-            
-            
-            
+        status_counts = pd.Series([r["status"] for r in metadata_records]).value_counts().to_dict()
+        self._logger.info(f"Finished: {status_counts}")
+
+
+    def _handle_result(self, conversion_result, pdf_path: Path, conversion_time: float):
+        status = conversion_result.status
+        error = "; ".join(e.error_message for e in conversion_result.errors)
+
+        if status not in (ConversionStatus.SUCCESS, ConversionStatus.PARTIAL_SUCCESS):
+            self._logger.error(f"Parsing failed for: {pdf_path} | {status.value} | {error}")
+            return self._make_metadata_record(pdf_path, status="failed", error=error)
+
+        document = conversion_result.document
+        markdown = MarkdownDocSerializer(doc=document, params=MARKDOWN_PARAMS).serialize().text
+
+        json_path = self._output_path(pdf_path, ".json")
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(document.export_to_dict()), encoding="utf-8")
+        # Markdown is written last, so its existence marks a completed report (used by skip_existing)
+        self._output_path(pdf_path, ".md").write_text(markdown, encoding="utf-8")
+
+        word_count = len(markdown.split())
+
+        if status == ConversionStatus.PARTIAL_SUCCESS:
+            self._logger.warning(f"Partially converted: {pdf_path} | {error}")
+            record_status = "partial_success"
+        elif word_count < MIN_WORD_COUNT:
+            self._logger.warning(f"PLEASE CHECK MANUALLY: {pdf_path} has only {word_count} words.")
+            record_status = "warning"
+        else:
+            record_status = "success"
+
+        confidence = conversion_result.confidence
+        record = self._make_metadata_record(pdf_path, status=record_status, error=error)
+        record.update({
+            "conversion_time": conversion_time,
+            "pages": conversion_result.input.page_count,
+            "word_count": word_count,
+            "detected_tables": len(document.tables),
+            "detected_pictures": len(document.pictures),
+            "mean_grade": confidence.mean_grade.value,
+            "low_grade": confidence.low_grade.value,
+            "parse_score": confidence.parse_score, # quality of the PDF text layer; NaN if there is none (scanned report)
+            "layout_score": confidence.layout_score,
+            "table_score": confidence.table_score,
+            "ocr_score": confidence.ocr_score, # NaN if no region was OCRed
+        })
+
+        return record
