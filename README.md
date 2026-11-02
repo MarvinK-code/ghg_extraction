@@ -86,11 +86,8 @@ The code is in `ghg_extraction/parsing.py`.
 
 #### Docling pipeline configuration
 
-Docling version: `2.145.0`.
-
-**OCR**
-
-OCR is enabled and uses the first available engine; with the current packages this is RapidOCR (torch). If you want to use other OCR engines, install them, e.g. `uv add "docling[easyocr]"`.
+**OCR**:
+OCR is enabled and uses the first available engine; RapidOCR (torch) as default. If you want to use other OCR engines install them via `uv add "docling[easyocr]"`.
 
 **Tables**
 
@@ -101,7 +98,6 @@ OCR is enabled and uses the first available engine; with the current packages th
 | `table_structure_options.do_cell_matching` | `False`    | cell text follows the cells predicted by TableFormer instead of the PDF's text cells |
 
 **Pictures** (detected, but not processed)
-
 This project currently bypasses any graphical visualisations for processing in subsequent modules. Consequently, numbers that only appear inside a chart or image are **not included** in the output.
 
 **Markdown export** (`MarkdownDocSerializer`)
