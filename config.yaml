@@ -3,3 +3,6 @@
 pdf_dir: "data/reports"
 
 # output
+
+# indexing
+embedding_model_name: "Qwen/Qwen3-Embedding-0.6B"

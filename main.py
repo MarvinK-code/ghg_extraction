@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 
 from ghg_extraction.helper.utils import load_config
 from ghg_extraction.parsing import PdfParser
+from ghg_extraction.indexing import ReportIndexer
 
 def main():
     
@@ -18,6 +19,10 @@ def main():
     
     pdf_parser = PdfParser(config)
     pdf_parser.parse_documents()
+
+    # One vector store per report, one chunk per page
+    indexer = ReportIndexer(config)
+    indexer.create_vector_stores()
 
     # rag = RAG(config)
     # rag.run_indexing()
