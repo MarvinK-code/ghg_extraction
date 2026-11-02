@@ -12,7 +12,6 @@ from docling.datamodel.pipeline_options import (
     TableFormerMode, # Option choice between FAST or ACCURATE mode
     TableStructureOptions,
 )
-from docling.datamodel.settings import settings
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc.document import ContentLayer
 from docling_core.transforms.serializer.markdown import MarkdownDocSerializer, MarkdownParams
@@ -30,13 +29,8 @@ MIN_WORD_COUNT = 100 # below this a report is flagged for manual check
 
 class PdfParser:
     """
-    Converts every report PDF in <pdf_dir>/<company>/ with docling. The output folder is
-    created next to pdf_dir:
-
-        <pdf_dir>/../output/
-            converted/<company>/<report>.md and .json
-            logs/pipeline_<timestamp>.log
-            summary_<timestamp>.csv
+    Converts every report PDF in the PDF directory with docling. The output folder is
+    created next to PDF directory.
 
     Parameters
     ----------
@@ -44,13 +38,12 @@ class PdfParser:
         Must contain "pdf_dir".
     do_ocr : bool
         OCR only runs on page regions without a PDF text layer (scanned pages) and on pages
-        whose text layer is broken, so born-digital pages keep their PDF text.
-    gpu_doc_batch_size : int
-        Number of reports converted in parallel. Only used if CUDA is available; on CPU
-        reports are always converted one at a time. Experimental in docling, benchmark first.
+        whose text layer is broken.
+
+    Reports are always converted one at a time.
     """
 
-    def __init__(self, config, do_ocr: bool = True, gpu_doc_batch_size: int = 1):
+    def __init__(self, config, do_ocr: bool = True):
         self._pdf_dir = Path(config["pdf_dir"])
         self._output_dir = self._pdf_dir.parent / "output"
         self._converted_dir = self._output_dir / "converted"
@@ -60,12 +53,7 @@ class PdfParser:
 
         cuda_available = torch.cuda.is_available()
 
-        # Batching of several documents only on GPU
-        doc_batch_size = gpu_doc_batch_size if cuda_available else 1
-        settings.perf.doc_batch_size = doc_batch_size
-        settings.perf.doc_batch_concurrency = doc_batch_size
-
-        page_batch_size = 64 if cuda_available else 4 # pages per model batch within one document
+        page_batch_size = 64 if cuda_available else 4 # pages of ONE report sent through a model at once
         pipeline_options = PdfPipelineOptions(
             accelerator_options=AcceleratorOptions(
                 device=AcceleratorDevice.CUDA if cuda_available else AcceleratorDevice.CPU
@@ -90,7 +78,7 @@ class PdfParser:
         self.converter.initialize_pipeline(InputFormat.PDF)
         self._logger.info(
             f"Pipeline initialized in {time.time() - start_time:.2f} seconds "
-            f"(cuda={cuda_available}, do_ocr={do_ocr}, doc_batch_size={doc_batch_size})."
+            f"(cuda={cuda_available}, do_ocr={do_ocr})."
         )
 
 
@@ -110,7 +98,7 @@ class PdfParser:
 
 
     def _load_documents(self):
-        """Returns all PDFs in <pdf_dir>/<company>/."""
+        """Returns all PDFs in PDF directory."""
 
         if not self._pdf_dir.is_dir():
             raise ValueError(f"PDF directory '{self._pdf_dir}' does not exist or is not a directory.")
@@ -155,11 +143,11 @@ class PdfParser:
         pd.DataFrame(metadata_records).to_csv(summary_path, index=False)
 
 
-    def parse_documents(self, skip_existing: bool = False):
+    def parse_documents(self, skip_existing: bool = True):
         """Parse documents and saves the results.
 
         Args:
-            skip_existing (bool, optional): Skip PDFs whose markdown output already exists. Defaults to False.
+            skip_existing (bool, optional): Skip PDFs whose markdown output already exists. Defaults to True.
         """
         pdf_files = self._load_documents()
         metadata_records = []
@@ -174,24 +162,20 @@ class PdfParser:
                     to_convert.append(pdf_path)
             pdf_files = to_convert
 
-        # raises_on_error=False: a failing report yields a FAILURE result instead of stopping the run
-        results = self.converter.convert_all(pdf_files, raises_on_error=False)
-
-        start_time = time.time()
-        for conversion_result in tqdm(results, total=len(pdf_files), colour="yellow"):
-            # Time between results; equals the per-report conversion time when doc_batch_size == 1
-            conversion_time = time.time() - start_time
-
-            pdf_path = Path(conversion_result.input.file)
+        for pdf_path in tqdm(pdf_files, colour="yellow"):
+            self._logger.info(f"Processing: {pdf_path}")
             try:
+                start_time = time.time()
+                # raises_on_error=False: a failing report returns a FAILURE result instead of raising
+                conversion_result = self.converter.convert(pdf_path, raises_on_error=False)
+                conversion_time = time.time() - start_time
                 record = self._handle_result(conversion_result, pdf_path, conversion_time)
             except Exception as exc:
-                self._logger.exception(f"Saving failed for: {pdf_path}")
+                self._logger.exception(f"Parsing failed for: {pdf_path}")
                 record = self._make_metadata_record(pdf_path, status="failed", error=f"{type(exc).__name__}: {exc}")
 
             metadata_records.append(record)
             self._save_summary(metadata_records) # after every report, so a crash keeps all finished records
-            start_time = time.time()
 
         if not pdf_files:
             self._save_summary(metadata_records)
