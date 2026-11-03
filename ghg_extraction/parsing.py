@@ -47,7 +47,7 @@ class PdfParser:
         self._output_dir = self._pdf_dir.parent.parent / "output"
         self._converted_dir = self._output_dir / "converted"
 
-        self._timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self._logger = self._make_logger(self._output_dir / "logs")
 
         cuda_available = torch.cuda.is_available()
