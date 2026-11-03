@@ -98,11 +98,6 @@ class RetrieverModule:
     """
     Runs the retrieval for every report with one global search query and saves the results.
 
-        output/
-            vectorstores/<company>/<report_id>/            (input, from ReportIndexer)
-            retrieval/<method>/<company>/<report_id>.json  (one result file per report, method e.g. "hybrid_instruct_rerank")
-            logs/retrieval_<timestamp>.log
-
     Parameters
     ----------
     config : dict
@@ -127,7 +122,7 @@ class RetrieverModule:
         if self.method not in ("dense", "bm25", "hybrid"):
             raise ValueError(f"Unknown retrieval method '{self.method}'. Use 'dense', 'bm25' or 'hybrid'.")
 
-        # BM25 always searches the keyword list, so the instruction only matters for dense and hybrid
+        # BM25 always searches the keyword list
         self.use_instruction_query = config.get("use_instruction_query", False) and self.method != "bm25"
 
         method_name = self.method

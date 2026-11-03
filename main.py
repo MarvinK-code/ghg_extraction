@@ -14,11 +14,6 @@ def main():
     prompts = load_config("prompts.yaml")
     
     # ATTENTION: Initializing and parsing documents takes a long time. 
-    # Uncomment the following lines ONLY if entire document parsing is intended.
-    # Once parsed, re-running the following code will parse the raw PDFs again.
-    
-    ##### --- USE WITH CAUTION --- #####
-    
     pdf_parser = PdfParser(config)
     pdf_parser.parse_documents()
 
