@@ -1,5 +1,4 @@
 from pathlib import Path
-from collections import defaultdict
 import json, re, shutil, time, logging
 from tqdm import tqdm
 import pandas as pd
@@ -13,56 +12,48 @@ from llama_index.vector_stores.faiss import FaissVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 from docling_core.types.doc.document import ContentLayer, DoclingDocument
-from docling_core.types.doc.labels import DocItemLabel
 from docling_core.transforms.serializer.markdown import MarkdownDocSerializer, MarkdownParams
+from docling_core.transforms.chunker.hierarchical_chunker import ChunkingSerializerProvider
+from docling_core.transforms.chunker.page_chunker import PageChunker
 
 
 # Same Markdown settings as parsing, but only the BODY layer: page headers/footers repeat on
-# every page and would blur the page embeddings. They are kept in the metadata instead.
-MARKDOWN_PARAMS = dict(
+# every page and would blur the page embeddings.
+MARKDOWN_PARAMS = MarkdownParams(
     layers={ContentLayer.BODY},
     include_hyperlinks=False,
     traverse_pictures=False,
     image_placeholder=" ",
 )
-PAGE_BREAK = "<<<PAGE_BREAK>>>"
 
-EMBED_BATCH_SIZE = 8 # pages embedded at once; pages are long, so keep this small
 
-# Metadata keys the LLM may see later; all others are only used for filtering and bookkeeping
-LLM_METADATA_KEYS = {"company", "report_name", "year", "page_no"}
+class MarkdownSerializerProvider(ChunkingSerializerProvider):
+    """Makes the PageChunker write each page as Markdown with MARKDOWN_PARAMS."""
+    def get_serializer(self, doc: DoclingDocument):
+        return MarkdownDocSerializer(doc=doc, params=MARKDOWN_PARAMS)
 
 
 class ReportIndexer:
     """
     Builds one FAISS vector store per parsed report, with one chunk per page.
 
-        output/
-            converted/<company>/<report>.json      (input, from PdfParser)
-            vectorstores/<company>/<report>/       (one vector store per report, manifest.json marks it complete)
-            logs/indexing_<timestamp>.log
-            indexing_summary_<timestamp>.csv
-
     Parameters
     ----------
     config : dict
-        Must contain "pdf_dir" and "embedding_model_name".
+        Must contain "output_dir" and "embedding_model_name".
     """
 
     def __init__(self, config):
-        self._output_dir = Path(config["pdf_dir"]).parent.parent / "output" # same location as PdfParser
+        self._output_dir = Path(config["output_dir"])
         self._converted_dir = self._output_dir / "converted"
         self._vectorstore_dir = self._output_dir / "vectorstores"
 
-        self._timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self._logger = self._make_logger(self._output_dir / "logs")
 
         self._embedding_model_name = config["embedding_model_name"]
-        self.embed_model = HuggingFaceEmbedding(
-            model_name=self._embedding_model_name,
-            embed_batch_size=EMBED_BATCH_SIZE,
-        )
-        self._embed_dim = len(self.embed_model.get_text_embedding("dimension test"))
+        self.embed_model = HuggingFaceEmbedding(model_name=self._embedding_model_name)
+        self._embed_dim = self.embed_model._model.get_embedding_dimension()
         self._tokenizer = AutoTokenizer.from_pretrained(self._embedding_model_name)
         self._max_tokens = self.embed_model.max_length
 
@@ -88,7 +79,7 @@ class ReportIndexer:
 
 
     def _load_documents(self):
-        """Returns all parsed report JSONs in output/converted/<company>/."""
+        """Returns all parsed report JSONs in output_dir/converted/...."""
 
         if not self._converted_dir.is_dir():
             raise ValueError(f"Converted directory '{self._converted_dir}' does not exist. Run the parsing first.")
@@ -112,88 +103,32 @@ class ReportIndexer:
         return manifest.get("embedding_model_name") == self._embedding_model_name
 
 
-    def _page_texts(self, doc: DoclingDocument):
-        """Returns {page_no: markdown} for every page of the report."""
-        page_nos = sorted(doc.pages)
-
-        # Fast path: serialize once and split at page breaks. Only valid if every page produced text,
-        # otherwise the pieces cannot be mapped to page numbers.
-        markdown = MarkdownDocSerializer(
-            doc=doc, params=MarkdownParams(page_break_placeholder=PAGE_BREAK, **MARKDOWN_PARAMS)
-        ).serialize().text
-        parts = markdown.split(PAGE_BREAK)
-        if len(parts) == len(page_nos):
-            return {page_no: part.strip() for page_no, part in zip(page_nos, parts)}
-
-        # Slow path: serialize page by page
-        return {
-            page_no: MarkdownDocSerializer(
-                doc=doc, params=MarkdownParams(pages={page_no}, **MARKDOWN_PARAMS)
-            ).serialize().text.strip()
-            for page_no in page_nos
-        }
-
-
-    def _page_metadata(self, doc: DoclingDocument):
-        """Collects section headers, page headers/footers and table/picture counts per page."""
-        section_headers = defaultdict(list)
-        furniture = defaultdict(list)
-        n_tables = defaultdict(int)
-        n_pictures = defaultdict(int)
-
-        for item, _ in doc.iterate_items(included_content_layers={ContentLayer.BODY, ContentLayer.FURNITURE}):
-            if not item.prov:
-                continue
-            page_no = item.prov[0].page_no
-            text = getattr(item, "text", "")
-
-            if item.content_layer == ContentLayer.FURNITURE:
-                if text:
-                    furniture[page_no].append(text)
-            elif item.label in (DocItemLabel.TITLE, DocItemLabel.SECTION_HEADER):
-                section_headers[page_no].append(text)
-            elif item.label == DocItemLabel.TABLE:
-                n_tables[page_no] += 1
-            elif item.label in (DocItemLabel.PICTURE, DocItemLabel.CHART):
-                n_pictures[page_no] += 1
-
-        return section_headers, furniture, n_tables, n_pictures
-
-
     def _make_nodes(self, doc: DoclingDocument, json_path: Path):
-        company = json_path.parent.name
-        report_name = json_path.stem
-        year_match = re.search(r"_(\d{4})$", report_name)
+        report_id = json_path.stem
 
-        page_texts = self._page_texts(doc)
-        section_headers, furniture, n_tables, n_pictures = self._page_metadata(doc)
-
+        # One chunk per page; empty pages (e.g. blank or picture-only) are skipped by the chunker.
+        # A paragraph that continues on the next page is one item in docling and belongs to its first page.
         nodes = []
-        for page_no, text in page_texts.items():
-            if not text:
-                continue # empty pages (e.g. blank or picture-only) are not indexed
+        for chunk in PageChunker(serializer_provider=MarkdownSerializerProvider()).chunk(doc):
+            text = chunk.text.strip()
+            
+            # the page number is determined by the first element (doc_items[0]) that occurs in the chunk (though the page number could be determined by the number of chunks since each chunk reflects a page)
+            page_no = chunk.meta.doc_items[0].prov[0].page_no
 
             metadata = {
-                "company": company,
-                "report_name": report_name,
-                "year": int(year_match.group(1)) if year_match else None,
+                "report_id": report_id,
                 "page_no": page_no,
                 "n_pages": len(doc.pages),
-                "section_headers": "; ".join(section_headers[page_no]),
-                "page_furniture": "; ".join(furniture[page_no]),
-                "n_tables": n_tables[page_no],
-                "n_pictures": n_pictures[page_no],
                 "word_count": len(text.split()),
                 "n_tokens": len(self._tokenizer(text)["input_ids"]),
                 "source_json": str(json_path),
             }
 
             nodes.append(TextNode(
-                id_=f"{report_name}_p{page_no}",
+                id_=f"{report_id}_p{page_no}",
                 text=text,
                 metadata=metadata,
                 excluded_embed_metadata_keys=list(metadata), # embed the page text only
-                excluded_llm_metadata_keys=[k for k in metadata if k not in LLM_METADATA_KEYS],
             ))
 
         return nodes
@@ -201,8 +136,7 @@ class ReportIndexer:
 
     def _make_record(self, json_path: Path, status, error=""):
         return {
-            "company": json_path.parent.name,
-            "report_name": json_path.stem,
+            "report_id": json_path.stem,
             "source_json": str(json_path),
             "status": status,
             "error": error,
@@ -270,20 +204,19 @@ class ReportIndexer:
         # Inner product on normalized embeddings (HuggingFaceEmbedding default) = cosine similarity
         vector_store = FaissVectorStore(faiss_index=faiss.IndexFlatIP(self._embed_dim))
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
-        index = VectorStoreIndex(nodes=nodes, storage_context=storage_context, embed_model=self.embed_model)
+        index = VectorStoreIndex(nodes=nodes, storage_context=storage_context, embed_model=self.embed_model, show_progress=True)
         index.storage_context.persist(persist_dir=str(report_dir))
 
         indexing_time = time.time() - start_time
 
         # The manifest is written last, so its existence marks a complete vector store (used by skip_existing)
         manifest = {
-            "company": json_path.parent.name,
-            "report_name": json_path.stem,
+            "report_id": json_path.stem,
             "source_json": str(json_path),
             "embedding_model_name": self._embedding_model_name,
             "embed_dim": self._embed_dim,
             "n_pages": len(doc.pages),
-            "n_indexed_pages": len(nodes),
+            "n_indexed_pages": len(nodes), # this might differ
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
         (report_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
