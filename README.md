@@ -95,7 +95,7 @@ OCR is enabled and uses the first available engine; RapidOCR (torch) as default.
 | ------------------------------------------ | ---------- | ------------------------------------------------------------------------------------ |
 | `do_table_structure`                       | `True`     | rows, columns and cells of each table are recognised (TableFormer)                   |
 | `table_structure_options.mode`             | `ACCURATE` | slower but more precise than `FAST`                                                  |
-| `table_structure_options.do_cell_matching` | `False`    | cell text follows the cells predicted by TableFormer instead of the PDF's text cells |
+| `table_structure_options.do_cell_matching` | `True`     | predicted cells are matched to the PDF's text cells and cleaned up (`False` can produce huge broken tables) |
 
 **Pictures** (detected, but not processed)
 This project currently bypasses any graphical visualisations for processing in subsequent modules. Consequently, numbers that only appear inside a chart or image are **not included** in the output.

@@ -62,7 +62,7 @@ class PdfParser:
             do_table_structure=True,
             table_structure_options=TableStructureOptions(
                 mode=TableFormerMode.ACCURATE,
-                do_cell_matching=False,
+                do_cell_matching=True, # False skips TableFormer's post-processing and can produce huge broken grids
             ),
             ocr_batch_size=page_batch_size,
             layout_batch_size=page_batch_size,
