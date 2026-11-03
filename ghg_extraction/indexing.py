@@ -17,12 +17,10 @@ from docling_core.transforms.chunker.hierarchical_chunker import ChunkingSeriali
 from docling_core.transforms.chunker.page_chunker import PageChunker
 
 
-# Same Markdown settings as parsing, but only the BODY layer: page headers/footers repeat on
-# every page and would blur the page embeddings.
 MARKDOWN_PARAMS = MarkdownParams(
-    layers={ContentLayer.BODY},
+    layers={ContentLayer.BODY, ContentLayer.FURNITURE},
     include_hyperlinks=False,
-    traverse_pictures=False,
+    traverse_pictures=False, # True for text content attached as children under picture nodes - Only for OCR
     image_placeholder=" ",
 )
 
@@ -112,7 +110,7 @@ class ReportIndexer:
         for chunk in PageChunker(serializer_provider=MarkdownSerializerProvider()).chunk(doc):
             text = chunk.text.strip()
             
-            # the page number is determined by the first element (doc_items[0]) that occurs in the chunk (though the page number could be determined by the number of chunks since each chunk reflects a page)
+            # the page number is determined by the first element (doc_items[0]) that occurs in the chunk (though the page number could be determined by the index of chunks since each chunk reflects a page)
             page_no = chunk.meta.doc_items[0].prov[0].page_no
 
             metadata = {

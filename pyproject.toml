@@ -7,9 +7,11 @@ requires-python = ">=3.13"
 dependencies = [
     "docling>=2.145.0",
     "faiss-cpu>=1.15.1",
+    "ipykernel>=7.4.0",
     "llama-index>=0.14.25",
     "llama-index-embeddings-huggingface>=0.8.0",
     "llama-index-vector-stores-faiss>=0.7.0",
+    "matplotlib>=3.11.2",
     "python-dotenv>=1.2.4",
     "pyyaml>=6.0.3",
 ]
