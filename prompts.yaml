@@ -1,0 +1,14 @@
+---
+# All prompts and queries of the pipeline. Settings (models, paths, top_k, ...) stay in config.yaml.
+
+# retrieval
+instruction_query: "Given a search query, retrieve relevant documents that contain the necessary information."
+search_query: "What are the company's total Scope 1, Scope 2 and Scope 3 greenhouse gas emissions?"
+bm25_query: >
+  greenhouse gas greenhouse gases ghg ghgs emission emissions emit
+  emitted carbon emissions carbon footprint carbon dioxide equivalent co2 co2e co2 equivalent scope 1
+  direct emissions scope 2 indirect emissions location-based market-based purchased
+  electricity purchased energy scope 3 upstream emissions downstream emissions value chain
+  emissions total ghg emissions absolute emissions gross emissions ghg emissions intensity tco2e tonnes
+  co2e metric tonnes kilotonnes million tonnes ghg protocol emissions inventory global warming potential
+  gwp biogenic emissions base year emissions emissions reduction

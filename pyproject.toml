@@ -10,6 +10,7 @@ dependencies = [
     "ipykernel>=7.4.0",
     "llama-index>=0.14.25",
     "llama-index-embeddings-huggingface>=0.8.0",
+    "llama-index-retrievers-bm25>=0.8.0",
     "llama-index-vector-stores-faiss>=0.7.0",
     "matplotlib>=3.11.2",
     "python-dotenv>=1.2.4",

@@ -7,3 +7,11 @@ output_dir: "output"
 
 # indexing
 embedding_model_name: "Qwen/Qwen3-Embedding-0.6B"
+
+# retrieval
+retrieval_method: "hybrid" # "dense", "bm25" or "hybrid"
+top_k: 5
+use_instruction_query: true # dense and hybrid: prefix the search query with instruction_query
+enable_reranking: false
+reranker_model_name: "Qwen/Qwen3-Reranker-0.6B"
+# search_query, bm25_query and instruction_query are in prompts.yaml
