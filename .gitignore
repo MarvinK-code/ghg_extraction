@@ -12,6 +12,7 @@ wheels/
 # data
 data/reports
 output/
+results/
 
 # Env
 .env
