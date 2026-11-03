@@ -12,9 +12,10 @@ from llama_index.vector_stores.faiss import FaissVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.retrievers.bm25 import BM25Retriever
 
+from ghg_extraction.helper.fusion import reciprocal_rank_fusion
+
 
 N_CANDIDATES = 20 # pages retrieved before reranking
-RRF_K = 60 # standard constant of reciprocal rank fusion
 
 
 def get_detailed_instruct(task_description: str, search_query: str) -> str:
@@ -64,13 +65,13 @@ class DenseRetriever:
 class KeywordRetriever:
     """BM25 on the page texts, always searched with the fixed keyword list (bm25_query)."""
     def __init__(self, index, bm25_query: str):
-        nodes = list(index.docstore.docs.values())
-        self.bm25 = BM25Retriever.from_defaults(nodes=nodes, similarity_top_k=len(nodes), stemmer=Stemmer.Stemmer("english"))
+        self.nodes = list(index.docstore.docs.values())
         self.bm25_query = bm25_query
 
     def retrieve(self, top_k: int):
-        nodes = [n for n in self.bm25.retrieve(self.bm25_query) if n.score > 0] # score 0 = no keyword on the page
-        return to_items(nodes[:top_k])
+        bm25 = BM25Retriever.from_defaults(nodes=self.nodes, similarity_top_k=top_k, stemmer=Stemmer.Stemmer("english"))
+        nodes = [n for n in bm25.retrieve(self.bm25_query) if n.score > 0] # score 0 = no keyword on the page
+        return to_items(nodes)
 
 
 class HybridRetriever:
@@ -83,15 +84,11 @@ class HybridRetriever:
         dense_items = self.dense_retriever.retrieve(search_query, top_k)
         keyword_items = self.keyword_retriever.retrieve(top_k)
 
-        # A page scores 1 / (RRF_K + rank) in each ranking it appears in; pages are matched by chunk_id
-        fused = {}
-        for items in (dense_items, keyword_items):
-            for rank, item in enumerate(items, start=1):
-                if item.chunk_id not in fused:
-                    fused[item.chunk_id] = replace(item, score=0.0)
-                fused[item.chunk_id].score += 1 / (RRF_K + rank)
+        # Fuse the two rankings by chunk_id, then put the fused score on the items
+        fused = reciprocal_rank_fusion([[item.chunk_id for item in dense_items], [item.chunk_id for item in keyword_items]])
+        items_by_id = {item.chunk_id: item for item in dense_items + keyword_items}
 
-        return sorted(fused.values(), key=lambda item: item.score, reverse=True)[:top_k]
+        return [replace(items_by_id[chunk_id], score=score) for chunk_id, score in fused[:top_k]]
 
 
 class RetrieverModule:
