@@ -181,14 +181,24 @@ class RetrieverModule:
 
     def _rerank(self, items):
         """Re-scores the candidates with the cross-encoder against the search query and keeps the top_k."""
+        
+        # rank() returns by default a sorted list with "corpus_id" and "score" of the reranked documents (optionally "text")
         ranks = self.cross_encoder.rank(
-            self.search_query,
-            [item.text for item in items],
+            query=self.search_query,
+            documents=[item.text for item in items],
             top_k=self.top_k,
             prompt=self.instruction_query, # Qwen3-Reranker always takes an instruction, separately from the query
             activation_fn=torch.nn.Sigmoid(), # score = probability that the page is relevant
+            show_progress_bar=True,
         )
-        return [replace(items[rank["corpus_id"]], score=float(rank["score"])) for rank in ranks]
+        
+        # store the reranked results by replacing the new ranked id ("corpus_id") and the score from the provided/retrieved items
+        # the results are capped by top_k 
+        results = []
+        for rank in ranks:
+            results.append(replace(items[rank["corpus_id"]], score=float(rank["score"])))
+        return results
+        #return [replace(items[rank["corpus_id"]], score=float(rank["score"])) for rank in ranks]
 
 
     def run_retrieval(self):
