@@ -86,9 +86,15 @@ class HybridRetriever:
 
         # Fuse the two rankings by chunk_id, then put the fused score on the items
         fused = reciprocal_rank_fusion([[item.chunk_id for item in dense_items], [item.chunk_id for item in keyword_items]])
-        items_by_id = {item.chunk_id: item for item in dense_items + keyword_items}
-
-        return [replace(items_by_id[chunk_id], score=score) for chunk_id, score in fused[:top_k]]
+        items_by_id = {}
+        for item in dense_items + keyword_items:
+            items_by_id[item.chunk_id] = item
+            
+        results = []
+        for chunk_id, score in fused[:top_k]:
+            item = items_by_id[chunk_id]
+            results.append(replace(item, score=score))
+        return results
 
 
 class RetrieverModule:
