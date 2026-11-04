@@ -187,9 +187,10 @@ class RetrieverModule:
             query=self.search_query,
             documents=[item.text for item in items],
             top_k=self.top_k,
-            prompt=self.instruction_query, # Qwen3-Reranker always takes an instruction, separately from the query
-            activation_fn=torch.nn.Sigmoid(), # score = probability that the page is relevant
+            prompt=self.instruction_query,
+            activation_fn=torch.nn.Sigmoid(),
             show_progress_bar=True,
+            batch_size=1, # change according to hardware capacity
         )
         
         # store the reranked results by replacing the new ranked id ("corpus_id") and the score from the provided/retrieved items
