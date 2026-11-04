@@ -2,6 +2,14 @@
 
 Extracts greenhouse gas (GHG) emission data from company reports (PDF).
 
+The pipeline has three stages so far. Each stage works on every report individually and reads the output of the previous stage:
+
+| Stage     | Code                          | Input                 | Output                                     |
+| --------- | ----------------------------- | --------------------- | ------------------------------------------ |
+| Parsing   | `ghg_extraction/parsing.py`   | report PDFs           | Markdown and docling JSON, one per report  |
+| Indexing  | `ghg_extraction/indexing.py`  | docling JSON          | one FAISS vector store per report          |
+| Retrieval | `ghg_extraction/retriever.py` | vector stores         | top-k pages per report, as one JSON file   |
+
 ## Setup
 
 The project uses [uv](https://docs.astral.sh/uv/) and Python 3.13.
@@ -26,15 +34,37 @@ data/
 │       └── Company B_2020.pdf
 ```
 
-**NOTE**: File names **must follow** `<company name>_<year>.pdf`.
+**NOTE**: File names **must follow** `<company name>_<year>.pdf`. The file name without `.pdf` is the `report_id` used in all later stages, for example `Company A_2021`.
+
+The gold standard for evaluating the retrieval is in `data/gold_data/`. It is prepared in `notebooks/prepare_goldstandard.ipynb` and used in `notebooks/retrieval_eval.ipynb`.
 
 ## Configuration
 
-`config.yaml` only needs the path to the reports:
+Settings are in `config.yaml`, all prompts and queries are in `prompts.yaml`.
 
-```yaml
-pdf_dir: "data/reports"
-```
+**`config.yaml`**
+
+| Setting                 | Example                      | Meaning                                                                                  |
+| ----------------------- | ---------------------------- | ---------------------------------------------------------------------------------------- |
+| `pdf_dir`               | `"data/reports"`             | folder with the report PDFs                                                              |
+| `output_dir`            | `"output"`                   | output folder of indexing and retrieval                                                  |
+| `embedding_model_name`  | `"Qwen/Qwen3-Embedding-0.6B"` | embedding model for indexing and dense retrieval                                         |
+| `retrieval_method`      | `"dense"`                    | `"dense"`, `"bm25"` or `"hybrid"`                                                        |
+| `top_k`                 | `5`                          | number of pages kept per report                                                          |
+| `use_instruction_query` | `true`                       | dense and hybrid: put `instruction_query` in front of the search query                   |
+| `enable_reranking`      | `true`                       | rerank the retrieved pages with a cross-encoder                                          |
+| `reranker_model_name`   | `"Qwen/Qwen3-Reranker-0.6B"` | cross-encoder, only loaded if `enable_reranking` is `true`                               |
+
+**NOTE**: Parsing does not read `output_dir`. It writes to the folder `output` two levels above `pdf_dir`, which is the project root for `data/reports`. Keep `output_dir` at `"output"`, otherwise indexing does not find the parsed reports.
+
+**`prompts.yaml`**
+
+| Prompt                | Used by                 | Meaning                                                                     |
+| --------------------- | ----------------------- | --------------------------------------------------------------------------- |
+| `search_query`        | dense, hybrid, reranker | the one global question, the same for all reports                           |
+| `instruction_query`   | dense, hybrid, reranker | task instruction for the Qwen models                                        |
+| `bm25_query`          | BM25, hybrid            | keyword list; BM25 searches only this list, never `search_query`            |
+| `bm25_query_distinct` | not used yet            | the same keywords with every token once (see [BM25](#bm25-retrieval-method-bm25)) |
 
 ## Run
 
@@ -42,7 +72,9 @@ pdf_dir: "data/reports"
 uv run main.py
 ```
 
-Parsing many reports may take a long time, especially on a CPU. Reports that were already converted are skipped, so you can stop and restart the run at any time.
+`main.py` runs the stages one after another. Comment out the stages you do not want to run. Currently, parsing and indexing are commented out and only the retrieval runs.
+
+Parsing and indexing may take a long time, especially on a CPU. Reports that were already parsed or indexed are skipped, so you can stop and restart these stages at any time. The retrieval does not skip anything and overwrites existing result files.
 
 ## Output
 
@@ -100,7 +132,7 @@ OCR is enabled and uses the first available engine; RapidOCR (torch) as default.
 **Pictures** (detected, but not processed)
 This project currently bypasses any graphical visualisations for processing in subsequent modules. Consequently, numbers that only appear inside a chart or image are **not included** in the output.
 
-**Markdown export** (`MarkdownDocSerializer`)
+**Markdown export**
 
 | Setting              | Value                  | Meaning                                                                      |
 | -------------------- | ---------------------- | ---------------------------------------------------------------------------- |
@@ -113,11 +145,43 @@ This project currently bypasses any graphical visualisations for processing in s
 
 ### Indexing
 
-TBD.
+The code is in `ghg_extraction/indexing.py` (class `ReportIndexer`). It builds **one FAISS vector store per report, with one chunk per page**, using only the parsed JSON files. A company with several reports gets several vector stores.
+
+Only the page text is embedded, with the same Markdown settings as in parsing: main text **and** page headers/footers, links as plain text, pictures replaced by a blank. Metadata is **not** embedded.
 
 ### Retrieval
 
-TBD.
+The code is in `ghg_extraction/retriever.py` (class `RetrieverModule`). The retrieval runs **for every report individually**: there is one global search query, and each report gets its own top-k pages.
+
+#### Dense retrieval (method `dense`)
+
+`DenseRetriever` embeds the search query and returns the pages with the highest cosine similarity.
+
+With `use_instruction_query: true`, the query is written in the format Qwen3-Embedding expects:
+
+```
+Instruct: <instruction_query>
+Query: <search_query>
+```
+
+With `false`, only `search_query` is embedded. The pages themselves are always embedded without an instruction.
+
+#### BM25 retrieval (method `bm25`)
+
+`KeywordRetriever` is a keyword search on the page texts with llama-index's `BM25Retriever`. It always searches `bm25_query`.
+
+#### Hybrid retrieval (method `hybrid`)
+
+`HybridRetriever` runs dense and BM25 retrieval and combines both rankings with reciprocal rank fusion (RRF, `ghg_extraction/helper/fusion.py`). Pages are matched by their `chunk_id`.
+
+`use_instruction_query` applies to the dense part only.
+
+#### Reranking (optional)
+
+With `enable_reranking: true`, any of the three methods first retrieves `max(top_k, 20)` candidates. For hybrid, reranking runs once, after the fusion. The cross-encoder then reads the search query together with each candidate page, and the best `top_k` pages are kept.
+
+`batch_size` is set to 1 (for CPU). Change this value in `ghg_extraction/retriever.py` according to available hardware for faster encoding.
+
 
 ### Generation
 
