@@ -14,12 +14,12 @@ def main():
     prompts = load_config("prompts.yaml")
     
     # ATTENTION: Initializing and parsing documents takes a long time. 
-    pdf_parser = PdfParser(config)
-    pdf_parser.parse_documents()
+    # pdf_parser = PdfParser(config)
+    # pdf_parser.parse_documents()
 
     # One vector store per report, one chunk per page
-    indexer = ReportIndexer(config)
-    indexer.create_vector_stores()
+    # indexer = ReportIndexer(config)
+    # indexer.create_vector_stores()
 
     # Top-k pages per report for the global search query
     retriever = RetrieverModule(config, prompts)

@@ -28,16 +28,16 @@ thousand t-CO 2,kt CO2e,1000
 10^3 tonnes,kt CO2e,1000
 1’000 tonnes CO2e,kt CO2e,1000
 KtCO2e,kt CO2e,1000
-MM MT CO2e,MM Mt CO2e,1.00E+12
+MM MT CO2e,Mt CO2e,1000000
 m t CO2,Mt CO2e,1000000
-MT CO2e,Mt CO2e,1000000
-MtCO2e,Mt CO2e,1000000
-MTCO2e,Mt CO2e,1000000
+MT CO2e,t CO2e,1
+MtCO2e,t CO2e,1
+MTCO2e,t CO2e,1
 million metric tons,Mt CO2e,1000000
 million metric tons CO2,Mt CO2e,1000000
 m metric t CO2,Mt CO2e,1000000
 MT of CO2e,Mt CO2e,1000000
-MT C02e,Mt CO2e,1000000
+MT C02e,t CO2e,1
 m tCO2e,Mt CO2e,1000000
 "tCO2e/Revenue Passenger Miles (000,000) and 140.2",Other,
 "tCO2e/Revenue Passenger Miles (000,000) and 139.7",Other,
