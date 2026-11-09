@@ -9,7 +9,7 @@ output_dir: "output"
 embedding_model_name: "Qwen/Qwen3-Embedding-0.6B"
 
 # retrieval
-retrieval_method: "hybrid" # "dense", "bm25" or "hybrid"
+retrieval_method: "bm25" # "dense", "bm25" or "hybrid"
 top_k: 5
 use_instruction_query: false # dense and hybrid: prefix the search query with instruction_query; set true or false
 enable_reranking: false # set true or false

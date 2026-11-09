@@ -17,6 +17,7 @@ def main():
     # pdf_parser = PdfParser(config)
     # pdf_parser.parse_documents()
 
+    # ATTENTION: Indexing all reports takes a long time.
     # One vector store per report, one chunk per page
     # indexer = ReportIndexer(config)
     # indexer.create_vector_stores()
